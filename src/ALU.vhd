@@ -24,69 +24,58 @@ use IEEE.STD_LOGIC_1164.ALL;
 use IEEE.NUMERIC_STD.ALL;
  
 entity ALU is
-    Port ( i_A : in STD_LOGIC_VECTOR (7 downto 0);
-           i_B : in STD_LOGIC_VECTOR (7 downto 0);
-           i_op : in STD_LOGIC_VECTOR (2 downto 0);
-           o_result : out STD_LOGIC_VECTOR (7 downto 0);
-           o_flags : out STD_LOGIC_VECTOR (3 downto 0));
+    Port (
+        i_A      : in  STD_LOGIC_VECTOR (7 downto 0);
+        i_B      : in  STD_LOGIC_VECTOR (7 downto 0);
+        i_op     : in  STD_LOGIC_VECTOR (2 downto 0);
+        o_result : out STD_LOGIC_VECTOR (7 downto 0);
+        o_flags  : out STD_LOGIC_VECTOR (3 downto 0)  -- N Z C V
+    );
 end ALU;
  
 architecture Behavioral of ALU is
+    -- 9-bit signals to capture carry-out in bit 8
+    signal w_A    : unsigned(8 downto 0);
+    signal w_B_in : unsigned(8 downto 0);   -- B (add) or ~B (sub)
+    signal w_cin  : unsigned(8 downto 0);   -- 0 (add) or 1 (sub)
+    signal w_sum  : unsigned(8 downto 0);
  
-    signal c_sum     : unsigned(8 downto 0);
-    signal c_result  : std_logic_vector(7 downto 0);
-    signal c_N       : std_logic;
-    signal c_Z       : std_logic;
-    signal c_C       : std_logic;
-    signal c_V       : std_logic;
+    signal w_and    : std_logic_vector(7 downto 0);
+    signal w_or     : std_logic_vector(7 downto 0);
+    signal w_result : std_logic_vector(7 downto 0);
  
+    signal w_N, w_Z, w_C, w_V : std_logic;
 begin
  
-    alu_proc : process(i_A, i_B, i_op)
-        variable v_A   : unsigned(8 downto 0);
-        variable v_B   : unsigned(8 downto 0);
-        variable v_sum : unsigned(8 downto 0);
-        variable v_res : std_logic_vector(7 downto 0);
-    begin
-        v_A := unsigned('0' & i_A);
-        v_B := unsigned('0' & i_B);
+    w_A <= '0' & unsigned(i_A);
  
-        v_res := (others => '0');
-        c_C   <= '0';
-        c_V   <= '0';
+    w_B_in <= '0' & unsigned(not i_B) when i_op = "001"
+              else '0' & unsigned(i_B);
  
-        case i_op is
-            when "000" =>
-                v_sum := v_A + v_B;
-                v_res := std_logic_vector(v_sum(7 downto 0));
-                c_C   <= v_sum(8);
-                c_V   <= (not i_A(7) and not i_B(7) and v_res(7)) or
-                          (i_A(7) and i_B(7) and not v_res(7));
+    w_cin  <= to_unsigned(1, 9) when i_op = "001"
+              else to_unsigned(0, 9);
  
-            when "001" =>
-                v_sum := v_A - v_B;
-                v_res := std_logic_vector(v_sum(7 downto 0));
-                c_C   <= v_sum(8);
-                c_V   <= (not i_A(7) and i_B(7) and v_res(7)) or
-                          (i_A(7) and not i_B(7) and not v_res(7));
+    w_sum <= w_A + w_B_in + w_cin;
  
-            when "010" =>
-                v_res := i_A and i_B;
+    w_and <= i_A and i_B;
+    w_or  <= i_A or  i_B;
  
-            when "011" =>
-                v_res := i_A or i_B;
+    with i_op select
+        w_result <= std_logic_vector(w_sum(7 downto 0)) when "000",   -- add
+                    std_logic_vector(w_sum(7 downto 0)) when "001",   -- subtract
+                    w_and                               when "010",   -- AND
+                    w_or                                when "011",   -- OR
+                    (others => '0')                     when others;
  
-            when others =>
-                v_res := (others => '0');
-        end case;
+    o_result <= w_result;
  
-        c_result <= v_res;
-    end process alu_proc;
+    w_N <= w_result(7);
+    w_Z <= '1' when w_result = "00000000" else '0';
+    w_C <= w_sum(8);
+    w_V <= (i_A(7) xor w_result(7)) and (w_B_in(7) xor w_result(7))
+           when (i_op = "000" or i_op = "001")
+           else '0';
  
-    c_N <= c_result(7);
-    c_Z <= '1' when c_result = "00000000" else '0';
- 
-    o_result <= c_result;
-    o_flags  <= c_N & c_Z & c_C & c_V;
+    o_flags <= w_N & w_Z & w_C & w_V;
  
 end Behavioral;

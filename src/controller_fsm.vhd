@@ -31,45 +31,37 @@ use IEEE.STD_LOGIC_1164.ALL;
 --library UNISIM;
 --use UNISIM.VComponents.all;
 
+ 
 entity controller_fsm is
-    Port ( i_clk   : in STD_LOGIC;
-           i_reset : in STD_LOGIC;
-           i_adv   : in STD_LOGIC;
-           o_cycle : out STD_LOGIC_VECTOR (3 downto 0));
+    Port (
+        i_clk   : in  STD_LOGIC;
+        i_reset : in  STD_LOGIC;
+        i_adv   : in  STD_LOGIC;   -- synchronous enable, NOT a clock
+        o_cycle : out STD_LOGIC_VECTOR (3 downto 0)
+    );
 end controller_fsm;
  
 architecture FSM of controller_fsm is
- 
-    type sm_cycle is (s_CLEAR, s_OP1, s_OP2, s_RESULT);
-    signal f_state    : sm_cycle := s_CLEAR;
-    signal f_adv_prev : std_logic := '0';
- 
+    signal f_state : std_logic_vector(3 downto 0) := "0001";
 begin
  
-    state_reg_proc : process(i_clk, i_reset)
+    state_reg : process(i_clk)
     begin
-        if i_reset = '1' then
-            f_state    <= s_CLEAR;
-            f_adv_prev <= '0';
-        elsif rising_edge(i_clk) then
-            f_adv_prev <= i_adv;
-            if (i_adv = '1' and f_adv_prev = '0') then
+        if rising_edge(i_clk) then
+            if i_reset = '1' then
+                f_state <= "0001";          -- synchronous reset
+            elsif i_adv = '1' then          -- advance only on btnC pulse
                 case f_state is
-                    when s_CLEAR  => f_state <= s_OP1;
-                    when s_OP1    => f_state <= s_OP2;
-                    when s_OP2    => f_state <= s_RESULT;
-                    when s_RESULT => f_state <= s_CLEAR;
-                    when others   => f_state <= s_CLEAR;
+                    when "0001" => f_state <= "0010";
+                    when "0010" => f_state <= "0100";
+                    when "0100" => f_state <= "1000";
+                    when "1000" => f_state <= "0001";
+                    when others => f_state <= "0001";
                 end case;
             end if;
         end if;
-    end process state_reg_proc;
+    end process;
  
-    with f_state select
-        o_cycle <= "0001" when s_CLEAR,
-                   "0010" when s_OP1,
-                   "0100" when s_OP2,
-                   "1000" when s_RESULT,
-                   "0001" when others;
+    o_cycle <= f_state;
  
 end FSM;
