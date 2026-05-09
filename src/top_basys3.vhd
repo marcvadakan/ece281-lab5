@@ -24,29 +24,25 @@ library ieee;
   use ieee.std_logic_1164.all;
   use ieee.numeric_std.all;
  
- 
 entity top_basys3 is
     port(
         -- inputs
-        clk     :   in std_logic; -- native 100MHz FPGA clock
-        sw      :   in std_logic_vector(7 downto 0); -- operands and opcode
-        btnU    :   in std_logic; -- reset
-        btnC    :   in std_logic; -- fsm advance (used as synchronous enable, NOT a clock)
-        btnL    :   in std_logic; -- clock divider reset
+        clk     : in  std_logic;
+        sw      : in  std_logic_vector(7 downto 0);
+        btnU    : in  std_logic; -- reset
+        btnC    : in  std_logic; -- fsm advance
+        btnL    : in  std_logic; -- clock divider reset
         -- outputs
-        led :   out std_logic_vector(15 downto 0);
-        -- 7-segment display segments (active-low cathodes)
-        seg :   out std_logic_vector(6 downto 0);
-        -- 7-segment display active-low enables (anodes)
-        an  :   out std_logic_vector(3 downto 0)
+        led     : out std_logic_vector(15 downto 0);
+        seg     : out std_logic_vector(6 downto 0);
+        an      : out std_logic_vector(3 downto 0)
     );
 end top_basys3;
  
 architecture top_basys3_arch of top_basys3 is
  
-    -- Component declarations
     component clock_divider is
-        generic ( k_DIV : natural := 25000 );  -- ~2 kHz from 100 MHz
+        generic ( k_DIV : natural := 25000 );
         port ( i_clk : in std_logic; i_reset : in std_logic; o_clk : out std_logic );
     end component;
  
@@ -54,7 +50,7 @@ architecture top_basys3_arch of top_basys3 is
         port (
             i_clk   : in  std_logic;
             i_reset : in  std_logic;
-            i_adv   : in  std_logic;   -- synchronous enable (one-cycle pulse), NOT a clock
+            i_adv   : in  std_logic;
             o_cycle : out std_logic_vector(3 downto 0)
         );
     end component;
@@ -79,14 +75,26 @@ architecture top_basys3_arch of top_basys3 is
                o_seg_n : out std_logic_vector(6 downto 0) );
     end component;
  
-    -- Clock / slow clock
+    component TDM4 is
+        generic ( constant k_WIDTH : natural := 4 );
+        port ( i_clk   : in  std_logic;
+               i_reset : in  std_logic;
+               i_D3    : in  std_logic_vector(k_WIDTH - 1 downto 0);
+               i_D2    : in  std_logic_vector(k_WIDTH - 1 downto 0);
+               i_D1    : in  std_logic_vector(k_WIDTH - 1 downto 0);
+               i_D0    : in  std_logic_vector(k_WIDTH - 1 downto 0);
+               o_data  : out std_logic_vector(k_WIDTH - 1 downto 0);
+               o_sel   : out std_logic_vector(3 downto 0) );
+    end component;
+ 
+    -- Clocks
     signal w_slow_clk : std_logic;
  
-    -- Button synchronizer and edge detector for btnC
+    -- Button synchronizer / edge detector
     signal f_btnC_sync  : std_logic_vector(1 downto 0) := "00";
-    signal w_btnC_pulse : std_logic;  -- single-cycle high pulse on rising edge of btnC
+    signal w_btnC_pulse : std_logic;
  
-    -- FSM / datapath wires
+    -- FSM / datapath
     signal w_cycle   : std_logic_vector(3 downto 0);
     signal w_regA    : std_logic_vector(7 downto 0) := (others => '0');
     signal w_regB    : std_logic_vector(7 downto 0) := (others => '0');
@@ -94,13 +102,19 @@ architecture top_basys3_arch of top_basys3 is
     signal w_flags   : std_logic_vector(3 downto 0);
     signal w_result  : std_logic_vector(7 downto 0) := (others => '0');
  
-    -- 7-segment display wires
-    signal w_sign     : std_logic;
+    -- twos_comp outputs
+    signal w_sign : std_logic;
     signal w_hund, w_tens, w_ones : std_logic_vector(3 downto 0);
-    signal w_seg_h, w_seg_t, w_seg_o : std_logic_vector(6 downto 0);
+ 
+    -- Sign digit: "0001" = '-' pattern, "1111" = blank
+    -- Encoded as 4-bit to feed into TDM4 (which feeds sevenseg_decoder)
+    signal w_sign_digit : std_logic_vector(3 downto 0);
+ 
+    -- TDM4 outputs
+    signal w_tdm_data : std_logic_vector(3 downto 0);
+ 
+    -- Display value fed into twos_comp
     signal w_display_value : std_logic_vector(7 downto 0);
-    signal w_mux_cnt  : unsigned(1 downto 0) := "00";
-    signal w_seg_sign : std_logic_vector(6 downto 0);
  
 begin
  
@@ -110,7 +124,6 @@ begin
         generic map ( k_DIV => 25000 )
         port map ( i_clk => clk, i_reset => btnL, o_clk => w_slow_clk );
  
-    -- FSM now receives the real clock and a one-cycle enable pulse
     u_fsm : controller_fsm
         port map (
             i_clk   => clk,
@@ -125,19 +138,35 @@ begin
                    o_result => w_alu_out, o_flags => w_flags );
  
     u_tc : twos_comp
-        port map ( i_bin => w_display_value, o_sign => w_sign,
-                   o_hund => w_hund, o_tens => w_tens, o_ones => w_ones );
+        port map ( i_bin => w_display_value,
+                   o_sign => w_sign,
+                   o_hund => w_hund,
+                   o_tens => w_tens,
+                   o_ones => w_ones );
  
-    u_dec_h : sevenseg_decoder port map ( i_Hex => w_hund, o_seg_n => w_seg_h );
-    u_dec_t : sevenseg_decoder port map ( i_Hex => w_tens, o_seg_n => w_seg_t );
-    u_dec_o : sevenseg_decoder port map ( i_Hex => w_ones, o_seg_n => w_seg_o );
+    -- TDM4 cycles through: sign(D3), hundreds(D2), tens(D1), ones(D0)
+    -- o_sel drives 'an' directly (already one-cold active-low)
+    u_tdm : TDM4
+        generic map ( k_WIDTH => 4 )
+        port map (
+            i_clk   => w_slow_clk,
+            i_reset => btnL,
+            i_D3    => w_sign_digit,  -- leftmost digit
+            i_D2    => w_hund,
+            i_D1    => w_tens,
+            i_D0    => w_ones,        -- rightmost digit
+            o_data  => w_tdm_data,
+            o_sel   => an
+        );
+ 
+    -- Single sevenseg_decoder driven by whichever digit TDM4 selects
+    u_seg : sevenseg_decoder
+        port map ( i_Hex => w_tdm_data, o_seg_n => seg );
  
  
     -- CONCURRENT STATEMENTS ----------------------------
  
-    -- Two-stage synchronizer for btnC to avoid metastability,
-    -- followed by rising-edge detection.  Everything is clocked
-    -- by the 100 MHz system clock so Vivado sees only one clock domain.
+    -- btnC two-stage synchronizer + rising-edge detector
     btnC_sync : process(clk)
     begin
         if rising_edge(clk) then
@@ -145,10 +174,9 @@ begin
         end if;
     end process;
  
-    -- Rising-edge pulse: high for exactly one 100 MHz clock cycle
     w_btnC_pulse <= f_btnC_sync(0) and (not f_btnC_sync(1));
  
-    -- Register A: latch switches when FSM is in cycle 1 and btnC is pressed
+    -- Register A
     reg_A : process(clk)
     begin
         if rising_edge(clk) then
@@ -160,7 +188,7 @@ begin
         end if;
     end process;
  
-    -- Register B: latch switches when FSM is in cycle 2 and btnC is pressed
+    -- Register B
     reg_B : process(clk)
     begin
         if rising_edge(clk) then
@@ -172,7 +200,7 @@ begin
         end if;
     end process;
  
-    -- Result register: latch ALU output when FSM is in cycle 3 and btnC is pressed
+    -- Result register
     reg_result : process(clk)
     begin
         if rising_edge(clk) then
@@ -184,40 +212,17 @@ begin
         end if;
     end process;
  
-    -- 7-seg digit-mux counter (driven by slow clock)
-    mux_counter : process(w_slow_clk)
-    begin
-        if rising_edge(w_slow_clk) then
-            w_mux_cnt <= w_mux_cnt + 1;
-        end if;
-    end process;
- 
-    -- Sign digit: '-' segment pattern when negative, blank when positive
-    w_seg_sign <= "0111111" when w_sign = '1' else "1111111";
- 
-    -- Display mux: choose which value to decode based on current FSM cycle
-    w_display_value <= w_regA   when w_cycle = "0010" else  -- A just loaded
-                       w_regB   when w_cycle = "0100" else  -- B just loaded
-                       w_result when w_cycle = "1000" else  -- result latched
+    -- Choose what value to display based on FSM cycle
+    w_display_value <= w_regA   when w_cycle = "0010" else
+                       w_regB   when w_cycle = "0100" else
+                       w_result when w_cycle = "1000" else
                        (others => '0');
  
-    -- Active-low anode enables (one digit at a time)
-    with w_mux_cnt select
-        an <= "1110" when "00",   -- ones  (rightmost)
-              "1101" when "01",   -- tens
-              "1011" when "10",   -- hundreds
-              "0111" when "11",   -- sign  (leftmost)
-              "1111" when others;
+    
+    w_sign_digit <= "1110" when w_sign = '1' else  -- '-' (E slot repurposed)
+                    "1111";                          -- blank (F slot repurposed)
  
-    -- Segment pattern fed to whichever digit is currently active
-    with w_mux_cnt select
-        seg <= w_seg_o    when "00",
-               w_seg_t    when "01",
-               w_seg_h    when "10",
-               w_seg_sign when "11",
-               "1111111"  when others;
- 
-    -- LEDs: cycle state on bottom 4, NZCV flags on top 4
+    -- LEDs
     led(3 downto 0)   <= w_cycle;
     led(11 downto 4)  <= (others => '0');
     led(15 downto 12) <= w_flags;
