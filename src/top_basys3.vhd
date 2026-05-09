@@ -26,13 +26,11 @@ library ieee;
  
 entity top_basys3 is
     port(
-        -- inputs
         clk     : in  std_logic;
         sw      : in  std_logic_vector(7 downto 0);
-        btnU    : in  std_logic; -- reset
-        btnC    : in  std_logic; -- fsm advance
-        btnL    : in  std_logic; -- clock divider reset
-        -- outputs
+        btnU    : in  std_logic;
+        btnC    : in  std_logic;
+        btnL    : in  std_logic;
         led     : out std_logic_vector(15 downto 0);
         seg     : out std_logic_vector(6 downto 0);
         an      : out std_logic_vector(3 downto 0)
@@ -42,24 +40,25 @@ end top_basys3;
 architecture top_basys3_arch of top_basys3 is
  
     component clock_divider is
-        generic ( k_DIV : natural := 25000 );
-        port ( i_clk : in std_logic; i_reset : in std_logic; o_clk : out std_logic );
+        generic ( constant k_DIV : natural := 2 );
+        port ( i_clk   : in  std_logic;
+               i_reset : in  std_logic;
+               o_clk   : out std_logic );
     end component;
  
     component controller_fsm is
-        port (
-            i_clk   : in  std_logic;
-            i_reset : in  std_logic;
-            i_adv   : in  std_logic;
-            o_cycle : out std_logic_vector(3 downto 0)
-        );
+        port ( i_clk   : in  std_logic;
+               i_reset : in  std_logic;
+               i_adv   : in  std_logic;
+               o_cycle : out std_logic_vector(3 downto 0) );
     end component;
  
     component ALU is
-        port ( i_A, i_B  : in  std_logic_vector(7 downto 0);
-               i_op      : in  std_logic_vector(2 downto 0);
-               o_result  : out std_logic_vector(7 downto 0);
-               o_flags   : out std_logic_vector(3 downto 0) );
+        port ( i_A     : in  std_logic_vector(7 downto 0);
+               i_B     : in  std_logic_vector(7 downto 0);
+               i_op    : in  std_logic_vector(2 downto 0);
+               o_result: out std_logic_vector(7 downto 0);
+               o_flags : out std_logic_vector(3 downto 0) );
     end component;
  
     component twos_comp is
@@ -68,11 +67,6 @@ architecture top_basys3_arch of top_basys3 is
                o_hund : out std_logic_vector(3 downto 0);
                o_tens : out std_logic_vector(3 downto 0);
                o_ones : out std_logic_vector(3 downto 0) );
-    end component;
- 
-    component sevenseg_decoder is
-        port ( i_Hex   : in  std_logic_vector(3 downto 0);
-               o_seg_n : out std_logic_vector(6 downto 0) );
     end component;
  
     component TDM4 is
@@ -87,142 +81,125 @@ architecture top_basys3_arch of top_basys3 is
                o_sel   : out std_logic_vector(3 downto 0) );
     end component;
  
-    -- Clocks
-    signal w_slow_clk : std_logic;
+    component sevenseg_decoder is
+        port ( i_Hex   : in  std_logic_vector(3 downto 0);
+               o_seg_n : out std_logic_vector(6 downto 0) );
+    end component;
  
-    -- Button synchronizer / edge detector
-    signal f_btnC_sync  : std_logic_vector(1 downto 0) := "00";
-    signal w_btnC_pulse : std_logic;
- 
-    -- FSM / datapath
+    signal w_clk_tdm : std_logic;
     signal w_cycle   : std_logic_vector(3 downto 0);
-    signal w_regA    : std_logic_vector(7 downto 0) := (others => '0');
-    signal w_regB    : std_logic_vector(7 downto 0) := (others => '0');
-    signal w_alu_out : std_logic_vector(7 downto 0);
-    signal w_flags   : std_logic_vector(3 downto 0);
-    signal w_result  : std_logic_vector(7 downto 0) := (others => '0');
  
-    -- twos_comp outputs
+    signal f_A : std_logic_vector(7 downto 0) := (others => '0');
+    signal f_B : std_logic_vector(7 downto 0) := (others => '0');
+ 
+    signal w_alu_result : std_logic_vector(7 downto 0);
+    signal w_flags      : std_logic_vector(3 downto 0);
+ 
+    signal w_display : std_logic_vector(7 downto 0);
+ 
     signal w_sign : std_logic;
-    signal w_hund, w_tens, w_ones : std_logic_vector(3 downto 0);
+    signal w_hund : std_logic_vector(3 downto 0);
+    signal w_tens : std_logic_vector(3 downto 0);
+    signal w_ones : std_logic_vector(3 downto 0);
  
-    -- Sign digit: "0001" = '-' pattern, "1111" = blank
-    -- Encoded as 4-bit to feed into TDM4 (which feeds sevenseg_decoder)
-    signal w_sign_digit : std_logic_vector(3 downto 0);
+    signal w_tdm_data  : std_logic_vector(3 downto 0);
+    signal w_tdm_sel   : std_logic_vector(3 downto 0);
  
-    -- TDM4 outputs
-    signal w_tdm_data : std_logic_vector(3 downto 0);
+    signal w_seg_raw   : std_logic_vector(6 downto 0);
+    signal w_sign_digit: std_logic_vector(3 downto 0);
  
-    -- Display value fed into twos_comp
-    signal w_display_value : std_logic_vector(7 downto 0);
+    signal f_btnC_count  : integer range 0 to 1000000 := 0;
+    signal f_btnC_stable : std_logic := '0';
+    signal f_btnC_prev   : std_logic := '0';
+    signal w_btnC_rise   : std_logic;
  
 begin
  
-    -- PORT MAPS ----------------------------------------
+    -- Button debounce
+    debounce : process(clk)
+    begin
+        if rising_edge(clk) then
+            if btnU = '1' then
+                f_btnC_count  <= 0;
+                f_btnC_stable <= '0';
+                f_btnC_prev   <= '0';
+            else
+                if btnC = '1' then
+                    if f_btnC_count = 1000000 then
+                        f_btnC_stable <= '1';
+                    else
+                        f_btnC_count <= f_btnC_count + 1;
+                    end if;
+                else
+                    f_btnC_count  <= 0;
+                    f_btnC_stable <= '0';
+                end if;
+                f_btnC_prev <= f_btnC_stable;
+            end if;
+        end if;
+    end process;
+ 
+    w_btnC_rise <= '1' when (f_btnC_stable = '1' and f_btnC_prev = '0') else '0';
  
     u_clkdiv : clock_divider
-        generic map ( k_DIV => 25000 )
-        port map ( i_clk => clk, i_reset => btnL, o_clk => w_slow_clk );
+        generic map ( k_DIV => 50000 )
+        port map ( i_clk => clk, i_reset => btnU, o_clk => w_clk_tdm );
  
     u_fsm : controller_fsm
-        port map (
-            i_clk   => clk,
-            i_reset => btnU,
-            i_adv   => w_btnC_pulse,
-            o_cycle => w_cycle
-        );
+        port map ( i_clk => clk, i_reset => btnU,
+                   i_adv => w_btnC_rise, o_cycle => w_cycle );
  
     u_alu : ALU
-        port map ( i_A => w_regA, i_B => w_regB,
-                   i_op => sw(2 downto 0),
-                   o_result => w_alu_out, o_flags => w_flags );
+        port map ( i_A => f_A, i_B => f_B, i_op => sw(2 downto 0),
+                   o_result => w_alu_result, o_flags => w_flags );
  
-    u_tc : twos_comp
-        port map ( i_bin => w_display_value,
-                   o_sign => w_sign,
-                   o_hund => w_hund,
-                   o_tens => w_tens,
-                   o_ones => w_ones );
+    u_twos : twos_comp
+        port map ( i_bin => w_display, o_sign => w_sign,
+                   o_hund => w_hund, o_tens => w_tens, o_ones => w_ones );
  
-    -- TDM4 cycles through: sign(D3), hundreds(D2), tens(D1), ones(D0)
-    -- o_sel drives 'an' directly (already one-cold active-low)
     u_tdm : TDM4
         generic map ( k_WIDTH => 4 )
-        port map (
-            i_clk   => w_slow_clk,
-            i_reset => btnL,
-            i_D3    => w_sign_digit,  -- leftmost digit
-            i_D2    => w_hund,
-            i_D1    => w_tens,
-            i_D0    => w_ones,        -- rightmost digit
-            o_data  => w_tdm_data,
-            o_sel   => an
-        );
+        port map ( i_clk => w_clk_tdm, i_reset => btnU,
+                   i_D3 => w_sign_digit, i_D2 => w_hund,
+                   i_D1 => w_tens,       i_D0 => w_ones,
+                   o_data => w_tdm_data, o_sel => w_tdm_sel );
  
-    -- Single sevenseg_decoder driven by whichever digit TDM4 selects
     u_seg : sevenseg_decoder
-        port map ( i_Hex => w_tdm_data, o_seg_n => seg );
+        port map ( i_Hex => w_tdm_data, o_seg_n => w_seg_raw );
  
- 
-    -- CONCURRENT STATEMENTS ----------------------------
- 
-    -- btnC two-stage synchronizer + rising-edge detector
-    btnC_sync : process(clk)
-    begin
-        if rising_edge(clk) then
-            f_btnC_sync <= f_btnC_sync(0) & btnC;
-        end if;
-    end process;
- 
-    w_btnC_pulse <= f_btnC_sync(0) and (not f_btnC_sync(1));
- 
-    -- Register A
-    reg_A : process(clk)
+    -- Registers
+    register_process : process(clk)
     begin
         if rising_edge(clk) then
             if btnU = '1' then
-                w_regA <= (others => '0');
-            elsif w_btnC_pulse = '1' and w_cycle = "0001" then
-                w_regA <= sw;
+                f_A <= (others => '0');
+                f_B <= (others => '0');
+            elsif w_btnC_rise = '1' then
+                if w_cycle = "0001" then f_A <= sw; end if;
+                if w_cycle = "0010" then f_B <= sw; end if;
             end if;
         end if;
     end process;
  
-    -- Register B
-    reg_B : process(clk)
-    begin
-        if rising_edge(clk) then
-            if btnU = '1' then
-                w_regB <= (others => '0');
-            elsif w_btnC_pulse = '1' and w_cycle = "0010" then
-                w_regB <= sw;
-            end if;
-        end if;
-    end process;
+    -- Display value mux
+    w_display <= (others => '0') when w_cycle = "0001" else
+                 f_A             when w_cycle = "0010" else
+                 f_B             when w_cycle = "0100" else
+                 w_alu_result    when w_cycle = "1000" else
+                 (others => '0');
  
-    -- Result register
-    reg_result : process(clk)
-    begin
-        if rising_edge(clk) then
-            if btnU = '1' then
-                w_result <= (others => '0');
-            elsif w_btnC_pulse = '1' and w_cycle = "0100" then
-                w_result <= w_alu_out;
-            end if;
-        end if;
-    end process;
+    -- "A" (x"A") in sevenseg_decoder renders the dash segment pattern
+    w_sign_digit <= "1010" when w_sign = '1' else "1111";
  
-    -- Choose what value to display based on FSM cycle
-    w_display_value <= w_regA   when w_cycle = "0010" else
-                       w_regB   when w_cycle = "0100" else
-                       w_result when w_cycle = "1000" else
-                       (others => '0');
+    -- Override seg to show '-' on leftmost digit when negative
+    seg <= "1111110" when (w_sign = '1' and w_tdm_sel = "0111") else
+           w_seg_raw;
  
-    
-    w_sign_digit <= "1110" when w_sign = '1' else  -- '-' (E slot repurposed)
-                    "1111";                          -- blank (F slot repurposed)
+    -- Blank leftmost digit when positive; blank all when cycle 1
+    an <= "1111" when w_cycle = "0001" else
+          "1111" when (w_sign = '0' and w_tdm_sel = "0111") else
+          w_tdm_sel;
  
-    -- LEDs
     led(3 downto 0)   <= w_cycle;
     led(11 downto 4)  <= (others => '0');
     led(15 downto 12) <= w_flags;
